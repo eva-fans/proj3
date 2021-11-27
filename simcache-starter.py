@@ -44,6 +44,14 @@ def print_state(pc, regs, memory, memquantity):
     if line != "":
         print(line)
 
+class LogEntry:
+    def __init__(self,cache_name, status, pc, addr, line):
+        self.cache_name=cache_name
+        self.status=status
+        self.pc=pc
+        self.addr=addr
+        self.line=line
+
 class Block:
     def __init__(self,size,signal):
         self.size=size
@@ -66,23 +74,22 @@ class Cache:
         self.size=size
         self.assoc=assoc
         self.blocksize=blocksize
-        self.ngroup=size/(assoc*blocksize)
-        self.mem=[ [] for i in range(0,self.group)]
+        self.ngroup=int(size/(assoc*blocksize))
+        self.mem=[ [] for i in range(0,self.ngroup)]
     
     # return (hit,value)
     def read(self,mem_addr):
         hit=False # True if cache hits
         value=0
-        group=mem_addr/self.blocksize%(1<<self.ngroup) # calculate the group number by memory address
-        signal=mem_addr/self.blocksize/(1<<self.ngroup) # calculate the signal by memory address
+        group=int(mem_addr/self.blocksize)%self.ngroup # calculate the group number by memory address
+        signal=int(mem_addr/(self.blocksize*self.ngroup)) # calculate the signal by memory address
         offset=mem_addr%self.blocksize # calculate cache block offset
         for i in range(0,len(self.mem[group])):
             if self.mem[group][i].signal == signal: # find the correct cache block
                 hit=True # update hitting status
                 value=self.mem[group][i].getMem(offset) # get the value of word
                 # move the block to the list top
-                temp=self.mem[group][i]
-                self.mem[group].pop(i)
+                temp=self.mem[group].pop(i)
                 self.mem[group].insert(0,temp)
                 break
         return (hit,value)
@@ -90,18 +97,39 @@ class Cache:
     # return hit
     def write(self,mem_addr,value):
         hit=False # True if cache hits
-        group=mem_addr/self.blocksize%(1<<self.ngroup) # calculate the group number by memory address
-        signal=mem_addr/self.blocksize/(1<<self.ngroup) # calculate the signal by memory address
+        group=int(mem_addr/self.blocksize)%self.ngroup # calculate the group number by memory address
+        signal=int(mem_addr/(self.blocksize*self.ngroup)) # calculate the signal by memory address
         offset=mem_addr%self.blocksize # calculate cache block offset
         for i in range(0,len(self.mem[group])):
             if self.mem[group][i].signal == signal: # find the correct cache block
                 hit=True # update hitting status
                 self.mem[group][i].setMem(offset,value)
                 # move the block to the list top
-                temp=self.mem[group].pop(i)oool.;//
+                temp=self.mem[group].pop(i)
                 self.mem[group].insert(0,temp)
                 break
         return hit
+        
+    def update(self,mem_addr,mem):
+        hit=False # True if cache hits
+        group=int(mem_addr/self.blocksize)%self.ngroup # calculate the group number by memory address
+        signal=int(mem_addr/(self.blocksize*self.ngroup)) # calculate the signal by memory address
+        block_number=int(mem_addr/self.blocksize)
+        for i in range(0,len(self.mem[group])):
+            if self.mem[group][i].signal == signal: # find the correct cache block
+                hit=True # update hitting status
+                self.mem[group][i].mem=mem[block_number*self.blocksize:(block_number+1)*self.blocksize]
+                # move the block to the list top
+                temp=self.mem[group].pop(i)
+                self.mem[group].insert(0,temp)
+                break
+        if hit is False: # not hit
+            if len(self.mem[group])>=self.assoc:
+                self.mem[group].pop()
+            block=Block(self.blocksize,signal)
+            block.mem=mem[block_number*self.blocksize:(block_number+1)*self.blocksize]
+            self.mem[group].insert(0,block)
+
 
 class Machine:
     def __init__(self,cache_config):
@@ -113,9 +141,10 @@ class Machine:
         if cache_config is None:
             self.cache=[]
         elif len(cache_config)==4:
-            self.cache=[Cache(cache_config[0:4])]
+            self.cache=[Cache(cache_config[0],cache_config[1],cache_config[2],cache_config[3])]
         elif len(cache_config)==8:
-            self.cache=[Cache(cache_config[0:4]), Cache(cache_config[4:8])]
+            self.cache=[Cache(cache_config[0],cache_config[1],cache_config[2],cache_config[3]),\
+                 Cache(cache_config[4],cache_config[5],cache_config[6],cache_config[7])]
         else:
             raise Exception("Invalid cache config")
         
@@ -178,7 +207,20 @@ class Machine:
             regDst=(instr>>7)%(1<<3)
             imm=instr%(1<<7)
             imm=sign_extend(imm,7,16)
-            value=self.getMem(self.getGpRegs(regAddr)+imm)
+            addr=(self.getGpRegs(regAddr)+imm)%constants.MEM_SIZE
+            value=0
+            hit=False # cache hits
+            for cache in self.cache:
+                line=int(addr/cache.blocksize)%cache.ngroup
+                (hit,value)=cache.read(addr)
+                if hit: # cache hits
+                    self.log.append(LogEntry(cache.name,'HIT',self.pc,addr,line))
+                    break
+                else: # cache dose not hit
+                    self.log.append(LogEntry(cache.name,'MISS',self.pc,addr,line))
+                    cache.update(addr,self.mem)
+            if hit is False: # cache does not hit
+                value=self.getMem(addr)
             self.setGpRegs(regDst,value)
         elif opcode==0x5: # Calculates a memory pointer by summing the signed number imm and the value $regAddr, and stores the value in $regSrc to that memory address
             regAddr=(instr>>10)%(1<<3)
@@ -186,7 +228,13 @@ class Machine:
             imm=instr%(1<<7)
             imm=sign_extend(imm,7,16)
             value=self.getGpRegs(regSrc)
-            self.setMem(self.getGpRegs(regAddr)+imm,value)
+            addr=(self.getGpRegs(regAddr)+imm)%constants.MEM_SIZE
+            self.setMem(addr,value)
+            for cache in self.cache:
+                line=int(addr/cache.blocksize)%cache.ngroup
+                hit=cache.write(addr,value)
+                self.log.append(LogEntry(cache.name,'SW',self.pc,addr,line))
+                self.update(addr,self.mem)
         elif opcode==0x6: # Compares the value of $regA with $regB. If the values are equal, jumps to the memory address identified by the address imm, which is encoded as the signed number rel_imm
             regA=(instr>>10)%(1<<3)
             regB=(instr>>7)%(1<<3)
@@ -309,6 +357,7 @@ def main():
         'or size,associativity,blocksize,size,associativity,blocksize (for two caches)')
     cmdline = parser.parse_args()
 
+    machine=Machine(None)
     if cmdline.cache is not None:
         parts = cmdline.cache.split(",")
         if len(parts) == 3:
@@ -316,14 +365,12 @@ def main():
             machine=Machine(["L1", L1size, L1assoc, L1blocksize])
             # TODO: execute E20 program and simulate one cache here
         elif len(parts) == 6:
-            ["L2", L1size, L1assoc, L1blocksize, "L2", L2size, L2assoc, L2blocksize] = \
+            [L1size, L1assoc, L1blocksize, L2size, L2assoc, L2blocksize] = \
                 [int(x) for x in parts]
-            machine=Machine([L1size, L1assoc, L1blocksize, L2size, L2assoc, L2blocksize])
+            machine=Machine(['L1',L1size, L1assoc, L1blocksize, 'L2',L2size, L2assoc, L2blocksize])
             # TODO: execute E20 program and simulate two caches here
         else:
             raise Exception("Invalid cache config")
-    
-    machine=Machine(None)
 
     with open(cmdline.filename) as file:
         machine_code=file.readlines() # TODO: your code here. Load file and parse using load_machine_code
@@ -331,6 +378,13 @@ def main():
     
     # TODO: your code here. Do simulation.
     machine.start() # turn the machine on
+
+    for cache in machine.cache:
+        print_cache_config(cache.name,cache.size,cache.assoc,cache.blocksize,cache.ngroup)
+    
+    for entry in machine.log:
+        print_log_entry(entry.cache_name,entry.status,entry.pc,entry.addr,entry.line)
+    
 
 
 
