@@ -1,0 +1,7 @@
+This project is a simulator of e20 machine.
+I create a machine with caches, then I open the e20 binary file to read, finally I load the machine code into memory.
+After the machine start, the machine read a word from memory and parse the word as instruction.
+If there is "sw" or "lw" instruction, I try to read firstly from cache L1, I will try to read from cache L2 if cache L1 does not hit, or I succeed reading the word.
+I will read the word from memory and update the cache, if the word is not in caches.
+When the cache detect the machine try to read from it, the cache log the behavoir into the machine.
+Finnaly, I print the cache access log.

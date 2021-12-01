@@ -11,7 +11,7 @@
             "program": "${file}",
             "args": [
                 "tests-cache/array-sum.bin",
-                "--cache","4,1,1"
+                "--cache","16,1,4"
             ],
             "console": "integratedTerminal"
         }
